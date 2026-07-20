@@ -1,0 +1,6 @@
+[project]
+name = "sf-caseops-mcp"
+version = "0.1.0"
+description = "Read-only Salesforce case operations as MCP tools, auth delegated to the sf CLI"
+requires-python = ">=3.10"
+dependencies = ["mcp>=1.0"]
