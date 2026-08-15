@@ -14,12 +14,16 @@ Milestone rows carry the case's Lightning URL so every number on the dashboard
 is one click from the record that proves or disproves it.
 """
 
+import sqlite3
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import sfcli
 
 LOCAL_TZ = ZoneInfo("America/New_York")
+
+HISTORY_DB = Path(__file__).parent / "sla_history.sqlite"
 
 SNAPSHOT_SOQL = (
     "SELECT CaseId, Case.CaseNumber, Case.Subject, Case.Priority, "
@@ -94,13 +98,39 @@ def fetch_snapshot() -> dict:
 
     # Oldest breach first is the actionable order everywhere except the
     # countdown bucket, which SOQL already sorted soonest-target-first.
-    return {
+    snapshot = {
         "generatedAt": now.astimezone(LOCAL_TZ).isoformat(),
         "instanceUrl": instance_url,
         "counts": {name: len(rows) for name, rows in buckets.items()},
         **buckets,
         "responsePerf": _response_perf(instance_url),
     }
+    _record_history(snapshot)
+    return snapshot
+
+
+def _record_history(snapshot: dict) -> None:
+    """Append this snapshot's summary to a local SQLite file so trends
+    survive the refresh cycle. Local file only — the Salesforce side of this
+    repo stays read-only."""
+    c = snapshot["counts"]
+    p = snapshot["responsePerf"]
+    with sqlite3.connect(HISTORY_DB) as db:
+        db.execute(
+            "CREATE TABLE IF NOT EXISTS snapshots ("
+            "ts TEXT, breaching_soon INT, breached_today INT, breached_week INT, "
+            "stale_backlog INT, waiting INT, perf_total INT, perf_met INT, "
+            "perf_met_pct INT, perf_median_delta_min INT)"
+        )
+        db.execute(
+            "INSERT INTO snapshots VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (
+                snapshot["generatedAt"],
+                c["breaching_soon"], c["breached_today"], c["breached_week"],
+                c["stale_backlog"], c["waiting"],
+                p["total"], p["met"], p["metPct"], p["medianDeltaMinutes"],
+            ),
+        )
 
 
 def _response_perf(instance_url: str) -> dict:

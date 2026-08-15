@@ -165,6 +165,19 @@ def render(snap: dict | None, error: str | None) -> str:
         f'<div class="label"><span class="dot" style="background:{color}"></span>{label}</div></div>'
         for key, label, color in tile_specs
     )
+    perf = snap.get("responsePerf")
+    if perf and perf["total"]:
+        med = perf["medianDeltaMinutes"]
+        med_text = f"{abs(med) // 60}h {abs(med) % 60:02d}m" if abs(med) >= 60 else f"{abs(med)}m"
+        met_color = "var(--good)" if perf["metPct"] >= 80 else "var(--critical)"
+        tiles += (
+            f'<div class="tile"><div class="n">{perf["metPct"]}%</div>'
+            f'<div class="label"><span class="dot" style="background:{met_color}"></span>'
+            f'✉️ Met first-response SLA ({perf["windowDays"]}d)</div></div>'
+            f'<div class="tile"><div class="n">{med_text}</div>'
+            f'<div class="label"><span class="dot" style="background:var(--ink-3)"></span>'
+            f'📐 Median response delta, {"late" if med > 0 else "early"} ({perf["windowDays"]}d)</div></div>'
+        )
     parts.append(f'<div class="tiles">{tiles}</div>')
 
     for key, label, _color, mode in BUCKETS:
