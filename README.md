@@ -43,6 +43,7 @@ can always verify before trusting an answer.
 | `recent_cases` | Cases from the last N days, optionally filtered by status |
 | `queue_volumes` | Open case counts by queue/owner — the "where's the backlog" view |
 | `case_volume_report` | Weekly created vs closed vs net, for trend spotting |
+| `sla_risk_report` | Entitlement milestone risk: pending first-response clocks, fresh breaches, paused waiting-on-customer milestones |
 
 ---
 
@@ -100,6 +101,38 @@ Example data below is synthetic.
 The useful part isn't any single query — it's that follow-up questions
 compose. "Break that down by priority" becomes a `soql_query` call the agent
 writes itself, using `describe_object` to get the field names right.
+
+---
+
+## SLA Watch — the always-on dashboard
+
+The same SLA query layer that powers `sla_risk_report` also drives a
+zero-dependency local dashboard:
+
+```bash
+python3 dashboard.py
+```
+
+Then pin `http://localhost:8787` as a browser tab. It re-queries the org at
+most every five minutes, auto-refreshes the page on the same interval, and
+survives a failed refresh by keeping the last good snapshot on screen with an
+error banner.
+
+The layout encodes a support-ops opinion about what deserves attention:
+
+- **Breaching soon** — pending first-response clocks, soonest first. The only
+  bucket where minutes matter.
+- **Breached today / this week** — fresh violations, oldest first, with a
+  per-owner rollup so you can see which queue is underwater.
+- **Waiting on resident** — its own quiet section. A paused clock where the
+  customer owes the next move is not the same kind of problem as a missed
+  first response, and mixing them buries the real fires.
+- **Stale backlog** — milestones breached more than 7 days ago, collapsed to
+  a count. These are zombie cases; they're real debt, but they'd drown the
+  actionable signal if listed inline.
+
+Every case number deep-links to the record in Lightning, so any number on the
+board is one click from the source of truth that verifies it.
 
 ---
 

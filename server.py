@@ -8,59 +8,21 @@ modify data.
 """
 
 import json
-import os
 import re
-import shutil
-import subprocess
 from collections import defaultdict
 from datetime import datetime, timedelta
 
 from mcp.server.fastmcp import FastMCP
 
-mcp = FastMCP("sf-caseops")
+import sla
+from sfcli import query as _query, sf as _sf
 
-SF_TIMEOUT = 120
+mcp = FastMCP("sf-caseops")
 
 DEFAULT_CASE_FIELDS = (
     "CaseNumber, Subject, Status, Priority, Origin, CreatedDate, "
     "ClosedDate, Owner.Name, Contact.Name, Account.Name"
 )
-
-
-def _sf(args: list[str]) -> dict:
-    """Run an sf CLI command with --json and return the parsed result."""
-    if shutil.which("sf") is None:
-        raise RuntimeError("The `sf` CLI is not installed or not on PATH.")
-    target = os.environ.get("SF_TARGET_ORG")
-    cmd = ["sf", *args, "--json"]
-    if target:
-        cmd += ["--target-org", target]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=SF_TIMEOUT)
-    try:
-        payload = json.loads(proc.stdout)
-    except json.JSONDecodeError:
-        raise RuntimeError(
-            f"sf returned non-JSON output (exit {proc.returncode}): "
-            f"{proc.stderr.strip() or proc.stdout[:500]}"
-        )
-    if payload.get("status") != 0:
-        raise RuntimeError(payload.get("message") or json.dumps(payload)[:500])
-    return payload["result"]
-
-
-def _query(soql: str) -> list[dict]:
-    result = _sf(["data", "query", "--query", soql])
-    records = result.get("records", [])
-    for r in records:
-        _strip_attributes(r)
-    return records
-
-
-def _strip_attributes(record: dict) -> None:
-    record.pop("attributes", None)
-    for v in record.values():
-        if isinstance(v, dict):
-            _strip_attributes(v)
 
 
 _SELECT_RE = re.compile(r"^\s*SELECT\b", re.IGNORECASE)
@@ -193,6 +155,31 @@ def case_volume_report(weeks: int = 4) -> str:
         for week, counts in sorted(weekly.items())
     ]
     return json.dumps({"weeks": report}, indent=2)
+
+
+@mcp.tool()
+def sla_risk_report(include_stale: bool = False, limit_per_bucket: int = 25) -> str:
+    """SLA milestone risk snapshot for open cases: pending first-response
+    clocks soonest-first (breaching_soon), breaches inside 24h
+    (breached_today), breaches 1-7 days old (breached_week), and paused
+    Waiting-on-Resident milestones (waiting). Milestones breached more than
+    7 days ago are counted but only listed when include_stale is true —
+    that bucket is mostly zombie cases. Every row carries the case's
+    Lightning URL."""
+    if not 1 <= limit_per_bucket <= 200:
+        raise ValueError("limit_per_bucket must be between 1 and 200")
+    snap = sla.fetch_snapshot()
+    report = {
+        "generatedAt": snap["generatedAt"],
+        "counts": snap["counts"],
+        "breaching_soon": snap["breaching_soon"][:limit_per_bucket],
+        "breached_today": snap["breached_today"][:limit_per_bucket],
+        "breached_week": snap["breached_week"][:limit_per_bucket],
+        "waiting": snap["waiting"][:limit_per_bucket],
+    }
+    if include_stale:
+        report["stale_backlog"] = snap["stale_backlog"][:limit_per_bucket]
+    return json.dumps(report, indent=2)
 
 
 if __name__ == "__main__":
