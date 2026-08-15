@@ -176,6 +176,33 @@ def render(snap: dict | None, error: str | None) -> str:
             + "</section>"
         )
 
+    perf = snap.get("responsePerf")
+    if perf and perf["total"]:
+        med = perf["medianDeltaMinutes"]
+        med_label = (
+            f"{abs(med) // 60}h {abs(med) % 60:02d}m " + ("late" if med > 0 else "early")
+            if abs(med) >= 60
+            else f"{abs(med)}m " + ("late" if med > 0 else "early")
+        )
+        perf_rows = "".join(
+            f"<tr><td class='when'>{r['deltaMinutes'] // 60}h {r['deltaMinutes'] % 60:02d}m late</td>"
+            f"<td><a href='{html.escape(r['url'])}' target='_blank'>{r['caseNumber']}</a></td>"
+            f"<td><span class='subject'>{html.escape(r['subject'] or '')}</span></td>"
+            f"<td>{html.escape(r['owner'] or '')}</td>"
+            f"<td class='when'>{datetime.fromisoformat(r['completed']).strftime('%a %b %-d, %-I:%M %p')}</td></tr>"
+            for r in perf["worst"]
+        )
+        parts.append(
+            f"<section><h2>First response performance — last {perf['windowDays']} days</h2>"
+            f'<div class="rollup">{perf["total"]} first responses completed · '
+            f'<b>{perf["metPct"]}% met SLA</b> ({perf["met"]} of {perf["total"]}) · '
+            f"median {med_label}. Deltas are wall-clock, so business-hours pauses "
+            "in the entitlement process read as later here than Salesforce counts them.</div>"
+            "<table><thead><tr><th>Missed by</th><th>Case</th><th>Subject</th>"
+            f"<th>Owner</th><th>Responded</th></tr></thead><tbody>{perf_rows}</tbody></table>"
+            "</section>"
+        )
+
     waiting = snap["waiting"]
     parts.append(
         f"<section><h2>Waiting on resident ({len(waiting)})</h2>"

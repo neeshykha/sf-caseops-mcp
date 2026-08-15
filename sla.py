@@ -29,6 +29,16 @@ SNAPSHOT_SOQL = (
     "ORDER BY TargetDate ASC"
 )
 
+RESPONSE_PERF_DAYS = 7
+
+RESPONSE_PERF_SOQL = (
+    "SELECT CaseId, Case.CaseNumber, Case.Subject, Case.Owner.Name, "
+    "TargetDate, CompletionDate "
+    "FROM CaseMilestone "
+    "WHERE MilestoneType.Name = 'First Response to Customer' "
+    f"AND IsCompleted = true AND CompletionDate = LAST_N_DAYS:{RESPONSE_PERF_DAYS}"
+)
+
 
 def _parse_sf_datetime(value: str) -> datetime:
     return datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%f%z")
@@ -89,4 +99,37 @@ def fetch_snapshot() -> dict:
         "instanceUrl": instance_url,
         "counts": {name: len(rows) for name, rows in buckets.items()},
         **buckets,
+        "responsePerf": _response_perf(instance_url),
+    }
+
+
+def _response_perf(instance_url: str) -> dict:
+    """How completed first responses landed against their SLA target over the
+    last RESPONSE_PERF_DAYS days. Deltas are wall-clock: if the entitlement
+    process pauses for business hours, a target that lapses over a weekend
+    reads as later than the process considers it."""
+    rows = []
+    for record in sfcli.query(RESPONSE_PERF_SOQL):
+        target = _parse_sf_datetime(record["TargetDate"])
+        completed = _parse_sf_datetime(record["CompletionDate"])
+        case = record["Case"]
+        rows.append({
+            "caseNumber": case["CaseNumber"],
+            "subject": case.get("Subject"),
+            "owner": (case.get("Owner") or {}).get("Name"),
+            "target": target.astimezone(LOCAL_TZ).isoformat(),
+            "completed": completed.astimezone(LOCAL_TZ).isoformat(),
+            "deltaMinutes": round((completed - target).total_seconds() / 60),
+            "url": f"{instance_url}/lightning/r/Case/{record['CaseId']}/view",
+        })
+    rows.sort(key=lambda r: -r["deltaMinutes"])
+    deltas = sorted(r["deltaMinutes"] for r in rows)
+    met = sum(1 for d in deltas if d <= 0)
+    return {
+        "windowDays": RESPONSE_PERF_DAYS,
+        "total": len(rows),
+        "met": met,
+        "metPct": round(100 * met / len(rows)) if rows else None,
+        "medianDeltaMinutes": deltas[len(deltas) // 2] if deltas else None,
+        "worst": rows[:10],
     }

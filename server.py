@@ -172,6 +172,7 @@ def sla_risk_report(include_stale: bool = False, limit_per_bucket: int = 25) -> 
     report = {
         "generatedAt": snap["generatedAt"],
         "counts": snap["counts"],
+        "responsePerf": snap["responsePerf"],
         "breaching_soon": snap["breaching_soon"][:limit_per_bucket],
         "breached_today": snap["breached_today"][:limit_per_bucket],
         "breached_week": snap["breached_week"][:limit_per_bucket],
