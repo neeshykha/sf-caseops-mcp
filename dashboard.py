@@ -202,15 +202,23 @@ def render(snap: dict | None, error: str | None) -> str:
             f"<td><a href='{html.escape(r['url'])}' target='_blank'>{r['caseNumber']}</a></td>"
             f"<td><span class='subject'>{html.escape(r['subject'] or '')}</span></td>"
             f"<td>{html.escape(r['owner'] or '')}</td>"
-            f"<td class='when'>{datetime.fromisoformat(r['completed']).strftime('%a %b %-d, %-I:%M %p')}</td></tr>"
+            f"<td class='when'>{datetime.fromisoformat(r['responded']).strftime('%a %b %-d, %-I:%M %p')}</td></tr>"
             for r in perf["worst"]
+        )
+        no_email = (
+            f" · {perf['noEmail']} with no outbound email excluded (phone/SMS)"
+            if perf.get("noEmail")
+            else ""
         )
         parts.append(
             f"<section><h2>First response performance — last {perf['windowDays']} days</h2>"
-            f'<div class="rollup">{perf["total"]} first responses completed · '
-            f'<b>{perf["metPct"]}% met SLA</b> ({perf["met"]} of {perf["total"]}) · '
-            f"median {med_label}. Deltas are wall-clock, so business-hours pauses "
-            "in the entitlement process read as later here than Salesforce counts them.</div>"
+            f'<div class="rollup">{perf["total"]} first responses, measured from the '
+            f"case's <b>first outbound email</b> (milestone CompletionDate is unreliable "
+            f"here — auto-completion misses some send paths, and manual sweeps stamp "
+            f'late times onto cases answered in minutes) · <b>{perf["metPct"]}% met SLA</b> '
+            f'({perf["met"]} of {perf["total"]}) · median {med_label}{no_email}. '
+            "Deltas are wall-clock, so business-hours pauses in the entitlement "
+            "process read as later here than Salesforce counts them.</div>"
             "<table><thead><tr><th>Missed by</th><th>Case</th><th>Subject</th>"
             f"<th>Owner</th><th>Responded</th></tr></thead><tbody>{perf_rows}</tbody></table>"
             "</section>"

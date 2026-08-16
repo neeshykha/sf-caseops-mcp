@@ -43,6 +43,11 @@ RESPONSE_PERF_SOQL = (
     f"AND IsCompleted = true AND CompletionDate = LAST_N_DAYS:{RESPONSE_PERF_DAYS}"
 )
 
+FIRST_OUTBOUND_SOQL = (
+    "SELECT ParentId, MessageDate FROM EmailMessage "
+    "WHERE Incoming = false AND ParentId IN ({ids}) ORDER BY MessageDate ASC"
+)
+
 
 def _parse_sf_datetime(value: str) -> datetime:
     return datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%f%z")
@@ -134,22 +139,45 @@ def _record_history(snapshot: dict) -> None:
 
 
 def _response_perf(instance_url: str) -> dict:
-    """How completed first responses landed against their SLA target over the
-    last RESPONSE_PERF_DAYS days. Deltas are wall-clock: if the entitlement
-    process pauses for business hours, a target that lapses over a weekend
-    reads as later than the process considers it."""
-    rows = []
-    for record in sfcli.query(RESPONSE_PERF_SOQL):
+    """How first responses landed against their SLA target over the last
+    RESPONSE_PERF_DAYS days — measured from the case's first outbound
+    EmailMessage, NOT the milestone's CompletionDate.
+
+    CompletionDate is unreliable in this org: milestone auto-completion only
+    fires on some send paths (verified 2026-08-15: per-agent split, 56% of
+    completions were days-late manual sweeps stamping garbage times onto
+    cases answered in minutes). The email timestamp is ground truth. Cases
+    with no outbound email (phone/SMS resolutions) are excluded and counted.
+
+    Deltas are wall-clock: if the entitlement process pauses for business
+    hours, a target that lapses over a weekend reads as later here than the
+    process considers it."""
+    milestones = sfcli.query(RESPONSE_PERF_SOQL)
+    if not milestones:
+        return {
+            "windowDays": RESPONSE_PERF_DAYS, "total": 0, "noEmail": 0,
+            "met": 0, "metPct": None, "medianDeltaMinutes": None, "worst": [],
+        }
+    ids = ",".join(f"'{m['CaseId']}'" for m in milestones)
+    first_outbound: dict[str, datetime] = {}
+    for e in sfcli.query(FIRST_OUTBOUND_SOQL.format(ids=ids)):
+        first_outbound.setdefault(e["ParentId"], _parse_sf_datetime(e["MessageDate"]))
+
+    rows, no_email = [], 0
+    for record in milestones:
+        responded = first_outbound.get(record["CaseId"])
+        if responded is None:
+            no_email += 1
+            continue
         target = _parse_sf_datetime(record["TargetDate"])
-        completed = _parse_sf_datetime(record["CompletionDate"])
         case = record["Case"]
         rows.append({
             "caseNumber": case["CaseNumber"],
             "subject": case.get("Subject"),
             "owner": (case.get("Owner") or {}).get("Name"),
             "target": target.astimezone(LOCAL_TZ).isoformat(),
-            "completed": completed.astimezone(LOCAL_TZ).isoformat(),
-            "deltaMinutes": round((completed - target).total_seconds() / 60),
+            "responded": responded.astimezone(LOCAL_TZ).isoformat(),
+            "deltaMinutes": round((responded - target).total_seconds() / 60),
             "url": f"{instance_url}/lightning/r/Case/{record['CaseId']}/view",
         })
     rows.sort(key=lambda r: -r["deltaMinutes"])
@@ -158,6 +186,7 @@ def _response_perf(instance_url: str) -> dict:
     return {
         "windowDays": RESPONSE_PERF_DAYS,
         "total": len(rows),
+        "noEmail": no_email,
         "met": met,
         "metPct": round(100 * met / len(rows)) if rows else None,
         "medianDeltaMinutes": deltas[len(deltas) // 2] if deltas else None,
