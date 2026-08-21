@@ -55,8 +55,16 @@ authed to at least one org, and Python 3.10+.
 ```bash
 git clone https://github.com/neeshykha/sf-caseops-mcp
 cd sf-caseops-mcp
-python3 -m venv .venv && ./.venv/bin/pip install mcp
+python3 -m venv .venv && ./.venv/bin/pip install "mcp>=1.28,<2"
 ```
+
+The version bound matters. The MCP Python SDK released v2.0.0 on 2026-07-28
+alongside the stateless spec revision, and it renamed `FastMCP` to `MCPServer`,
+so a bare `pip install mcp` now resolves to an SDK this server does not import
+against. This server uses none of the features that revision reworked — no
+sampling, roots, logging, or elicitation — so there is no urgency to port; v1.x
+is in security-fix-only maintenance and a v2 port is a deliberate change for
+later, not something to acquire by accident.
 
 **Claude Code:**
 

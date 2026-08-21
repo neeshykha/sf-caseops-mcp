@@ -1,6 +1,24 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "sf-caseops-mcp"
 version = "0.1.0"
 description = "Read-only Salesforce case operations as MCP tools, auth delegated to the sf CLI"
 requires-python = ">=3.10"
-dependencies = ["mcp>=1.0"]
+# Upper bound is load-bearing, not caution. The MCP Python SDK shipped v2.0.0
+# on 2026-07-28 for the stateless 2026-07-28 spec revision, and it renamed
+# FastMCP -> MCPServer. `mcp>=1.0` resolved to 2.x, so a fresh `pip install -e .`
+# died on server.py's import line. v1.x is in security-fix-only maintenance;
+# porting to the v2 API is a separate deliberate change, not an accident of
+# resolution order.
+dependencies = ["mcp>=1.28,<2"]
+
+# Flat layout with four top-level modules, which setuptools refuses to
+# auto-discover ("Multiple top-level modules discovered in a flat-layout"), so
+# `pip install -e .` failed outright from the 2026-08-14 split that created
+# sfcli/sla/dashboard. Naming them explicitly makes the declared dependency
+# above actually enforceable instead of decorative.
+[tool.setuptools]
+py-modules = ["server", "sfcli", "sla", "dashboard"]

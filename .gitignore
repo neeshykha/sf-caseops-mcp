@@ -2,3 +2,6 @@
 __pycache__/
 *.pyc
 sla_history.sqlite
+*.egg-info/
+build/
+dist/
