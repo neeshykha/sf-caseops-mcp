@@ -44,6 +44,7 @@ can always verify before trusting an answer.
 | `queue_volumes` | Open case counts by queue/owner — the "where's the backlog" view |
 | `case_volume_report` | Weekly created vs closed vs net, for trend spotting |
 | `sla_risk_report` | Entitlement milestone risk: pending first-response clocks, fresh breaches, paused waiting-on-customer milestones |
+| `problem_candidates` | Candidate problem records: Product/Type pairs recurring at one property, weekly bursts over a pair's own baseline, units that keep coming back |
 
 ---
 
@@ -141,6 +142,86 @@ The layout encodes a support-ops opinion about what deserves attention:
 
 Every case number deep-links to the record in Lightning, so any number on the
 board is one click from the source of truth that verifies it.
+
+---
+
+## Problem Queue — incidents into problem candidates
+
+An incident is one case. A problem is whatever keeps producing them. Support
+teams are good at the first and tend to find the second by accident: someone
+notices they've typed the same reply four times this week. `problem_candidates`
+does that noticing on purpose, and `problem_page.py` renders the result as one
+static HTML file:
+
+```bash
+python3 problem_page.py              # last 90 days -> ~/Downloads/problem-queue.html
+python3 problem_page.py --days 30
+python3 problem_page.py --as-of 2026-06-30 --out june.html
+```
+
+Three signals, all deterministic:
+
+- **Recurrence**: the same Product/Type pair at the same property, five or
+  more times in the window. The unit count tells you which kind of problem
+  it is. Twenty cases across twenty units is the building; five cases at one
+  unit is a device or a resident.
+- **Burst**: a pair whose week ran at twice the median of its own previous
+  eight weeks, and at least five cases over it. Each pair is judged against
+  itself, so a noisy category doesn't drown a quiet one that tripled. The
+  median matters: one bad week doesn't raise the bar for the next.
+- **Repeat contact**: three or more cases from one unit, each within 14 days
+  of the one before. Product and type can differ here, because the signal is
+  that the first answer didn't hold.
+
+Every candidate shows its count, the properties it touches, first and last
+seen, and whether a Jira key is recorded on any of its cases. Every case
+number links to the record in Lightning. A candidate is a claim, and the
+cases are how you check it.
+
+**What it reads, and what it doesn't.** Product, type, account, unit,
+created date, and the Jira field. No subjects, no descriptions, no model
+reading case text. That's a deliberate trade: nothing a customer wrote
+leaves the org or lands on the page, and the same input gives the same
+answer every time. The cost is that grouping is only as good as the
+classification agents did at intake.
+
+So the page leads with that cost. A case with no Product can't join any
+candidate, and the share of cases in that state sits at the top in the
+largest type on the page, above the first candidate. Cases with a Product
+but a Type of "Other" still group, tagged as weak, because a pile of Other at
+one property is a lead and not a diagnosis. If a problem mostly arrives
+unclassified, this tool won't see it, and it says so.
+
+**The Jira tag is a record, not a status.** In my org, agents paste the
+ticket's browse URL into a text field on the case. The tool pulls the key
+out of that URL and ignores everything else in the field, including bare
+`ABC-123` patterns, which also match firmware versions. A key means someone
+recorded a ticket. It doesn't mean the ticket is open, because this server
+has no Jira access and I'd rather not add a second credential to find out.
+No key means none was recorded, which is its own finding more often than
+you'd hope.
+
+**Checked against work done by hand.** `--as-of` rebuilds the queue as it
+would have read on an earlier date. I ran it against a defect I'd already
+dated manually from years of case history, one that showed up under two
+categories. The burst signal flagged one of them in the same month the hand
+investigation put the change in volume. It never flagged the other: that
+category climbed for three months, peaking at 1.6x to 1.75x its baseline
+against a 2x bar, because a rolling median follows a slow ramp up. Bursts
+catch jumps, not drifts. And nothing here could see the first reports, filed
+ten months earlier: two cases, recognizable only from what the customer
+wrote. That's the boundary of a metadata-only approach, and the reason this
+produces candidates for a person to review and not problem records.
+
+The field names in `CASES_SOQL` (`Product_Level_1__c`, `Type_Level_2__c`,
+`Unit_Number__c`, `Jira_Information__c`) are my org's. Swap them for your own
+taxonomy; the grouping in `build_report` only sees the normalized rows.
+
+The grouping logic is pure and tested against synthetic fixtures:
+
+```bash
+python3 -m unittest discover -s tests
+```
 
 ---
 

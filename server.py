@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 
 from mcp.server.fastmcp import FastMCP
 
+import problems
 import sla
 from sfcli import query as _query, sf as _sf
 
@@ -180,6 +181,64 @@ def sla_risk_report(include_stale: bool = False, limit_per_bucket: int = 25) -> 
     }
     if include_stale:
         report["stale_backlog"] = snap["stale_backlog"][:limit_per_bucket]
+    return json.dumps(report, indent=2)
+
+
+@mcp.tool()
+def problem_candidates(
+    days: int = 90,
+    signal: str = "",
+    min_cases: int = 5,
+    repeat_days: int = 14,
+    limit: int = 5,
+    cases_per_candidate: int = 3,
+) -> str:
+    """Candidate ITIL problem records from the last N days of cases, grouped
+    on metadata only (Product/Type, account, unit, created date): the same
+    Product/Type pair recurring at one property (recurrence), a pair's week
+    running above its own 8-week baseline (burst), and one unit coming back
+    within repeat_days of its last case (repeat_contact). Each candidate
+    carries count, affected properties, first and last seen, any Jira keys
+    recorded on its cases, and Lightning URLs. Read `coverage` first: cases
+    with no Product can't form a candidate, and that share is reported there.
+    Filter with signal='recurrence' | 'burst' | 'repeat_contact'."""
+    if not 7 <= days <= 365:
+        raise ValueError("days must be between 7 and 365")
+    if signal not in ("", "recurrence", "burst", "repeat_contact"):
+        raise ValueError("signal must be recurrence, burst, repeat_contact, or empty")
+    if not 2 <= min_cases <= 100:
+        raise ValueError("min_cases must be between 2 and 100")
+    if not 1 <= repeat_days <= 90:
+        raise ValueError("repeat_days must be between 1 and 90")
+    if not 1 <= limit <= 50:
+        raise ValueError("limit must be between 1 and 50")
+    if not 1 <= cases_per_candidate <= 50:
+        raise ValueError("cases_per_candidate must be between 1 and 50")
+    full = problems.fetch_report(days, min_cases=min_cases, repeat_days=repeat_days)
+    report = {
+        key: full[key]
+        for key in ("generatedAt", "window", "thresholds", "coverage")
+    }
+    for key in ("recurrence", "burst", "repeat_contact"):
+        if signal and signal != key:
+            continue
+        report[key] = {
+            "total": len(full[key]),
+            # Trimmed to fit a tool result: the top properties, and the
+            # newest cases, which are the ones worth opening. `count` and
+            # `propertyCount` still describe the whole candidate.
+            "candidates": [
+                {
+                    **c,
+                    "properties": c["properties"][:5],
+                    "cases": [
+                        {k: case[k] for k in ("caseNumber", "created", "closed", "url")}
+                        for case in c["cases"][::-1][:cases_per_candidate]
+                    ],
+                }
+                for c in full[key][:limit]
+            ],
+        }
     return json.dumps(report, indent=2)
 
 

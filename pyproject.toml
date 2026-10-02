@@ -21,4 +21,4 @@ dependencies = ["mcp>=1.28,<2"]
 # sfcli/sla/dashboard. Naming them explicitly makes the declared dependency
 # above actually enforceable instead of decorative.
 [tool.setuptools]
-py-modules = ["server", "sfcli", "sla", "dashboard"]
+py-modules = ["server", "sfcli", "sla", "dashboard", "problems", "problem_page"]
