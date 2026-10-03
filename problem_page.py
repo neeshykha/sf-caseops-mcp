@@ -109,7 +109,8 @@ SECTIONS = [
         "repeat_contact", "Repeat contacts from one unit",
         "{minRepeats} or more cases from the same unit, each within {repeatDays} days of the one "
         "before. Product and type can differ: the signal is that the first answer didn't hold. "
-        "A chain that started before the window is shown whole.",
+        "A chain that started before the window is shown whole. A placeholder unit (Undefined, 000, "
+        "N/A) is tagged: that usually means a PMS-match or self-guided-tour gap, not one resident.",
     ),
 ]
 
@@ -163,6 +164,8 @@ def _candidate(c: dict) -> str:
     tags = [_jira_tag(c)]
     if c.get("weakType"):
         tags.append('<span class="tag weak">weak type</span>')
+    if c.get("placeholderUnit"):
+        tags.append('<span class="tag weak">placeholder unit</span>')
     body = []
 
     if c["signal"] != "recurrence":
@@ -170,6 +173,12 @@ def _candidate(c: dict) -> str:
             f"<span class='chip'>{_e(p['name'])} <small>{p['count']}</small></span>"
             for p in c["properties"]
         ) + "</div>")
+    if c.get("placeholderUnit"):
+        body.append(
+            "<div class='sub'>This unit record is a placeholder, so these are probably different "
+            "people. Usually a PMS sync that never matched residents to units, or self-guided-tour "
+            "prospects with no unit yet.</div>"
+        )
     if c["signal"] == "repeat_contact":
         body.append("<h3>Issue types</h3><div class='chips'>" + "".join(
             f"<span class='chip'>{_e(p)}</span>" for p in c["pairs"]

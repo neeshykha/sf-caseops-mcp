@@ -46,6 +46,12 @@ CASES_SOQL = (
     "FROM Case WHERE CreatedDate >= {since} ORDER BY CreatedDate ASC"
 )
 
+# Unit records that stand in for "no real unit": a resident the PMS never
+# matched, a prospect on a self-guided tour, an agent who picked the
+# default. Repeat contacts on one of these still count, but they point at
+# the integration more than at a resident, so they're tagged.
+_PLACEHOLDER_UNIT_RE = re.compile(r"^\s*(|0+|undefined|unknown|n/?a|none|tbd|-+)\s*$", re.IGNORECASE)
+
 # Jira_Information__c is a hand-typed textarea: usually one or more browse
 # URLs, sometimes a release note or a link to somewhere that isn't Jira.
 # Only a browse URL counts as a ticket. A bare KEY-123 pattern also matches
@@ -68,6 +74,10 @@ def parse_jira(text: str | None) -> tuple[dict[str, str | None], bool]:
     for match in _JIRA_URL_RE.finditer(text):
         keys.setdefault(match.group(1), match.group(0))
     return keys, not keys
+
+
+def is_placeholder_unit(name: str | None) -> bool:
+    return name is None or bool(_PLACEHOLDER_UNIT_RE.match(name))
 
 
 def normalize(record: dict, instance_url: str) -> dict:
@@ -209,8 +219,8 @@ def _repeat_contacts(
             span = chain[-1]["created"] - chain[0]["created"]
             found.append(_candidate(
                 "repeat_contact", chain,
-                unit=chain[0]["unit"], property=chain[0]["property"],
-                parent=chain[0]["parent"], spanDays=span.days,
+                unit=chain[0]["unit"], placeholderUnit=is_placeholder_unit(chain[0]["unit"]),
+                property=chain[0]["property"], parent=chain[0]["parent"], spanDays=span.days,
                 pairs=sorted({f"{c['product']} / {c['type'] or '(no type)'}" for c in chain}),
             ))
     found.sort(key=lambda c: (

@@ -288,6 +288,19 @@ class RepeatContact(unittest.TestCase):
         cases = [days_ago(d) for d in (99, 96, 93)]
         self.assertEqual(problems.build_report(cases, NOW)["repeat_contact"], [])
 
+    def test_placeholder_unit_is_kept_and_tagged(self):
+        cases = [days_ago(d, unit="000") for d in (3, 2, 1)]
+        cases += [days_ago(d, unit="204") for d in (3, 2, 1)]
+        found = {c["unit"]: c for c in problems.build_report(cases, NOW)["repeat_contact"]}
+        self.assertTrue(found["000"]["placeholderUnit"])
+        self.assertFalse(found["204"]["placeholderUnit"])
+
+    def test_placeholder_unit_names(self):
+        for name in (None, "", "  ", "0", "000", "Undefined", "UNKNOWN", "N/A", "na", "none", "TBD", "--"):
+            self.assertTrue(problems.is_placeholder_unit(name), repr(name))
+        for name in ("101", "0101", "A", "2-101", "PH1", "10", "Office"):
+            self.assertFalse(problems.is_placeholder_unit(name), repr(name))
+
     def test_min_repeats(self):
         cases = [days_ago(d) for d in (2, 1)]
         self.assertEqual(problems.build_report(cases, NOW)["repeat_contact"], [])
