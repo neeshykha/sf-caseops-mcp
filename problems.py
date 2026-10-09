@@ -3,7 +3,7 @@ tool and the Problem Queue page.
 
 An incident is one case. A problem is the thing that keeps causing cases.
 This module reads case metadata and proposes candidate problem records from
-three deterministic signals:
+four deterministic signals:
 
   recurrence      the same Product/Type pair at the same property, min_cases
                   or more times inside the window
@@ -11,6 +11,10 @@ three deterministic signals:
                   the one before it, min_repeats or more cases in the chain
   burst           a Product/Type pair whose weekly count ran above the median
                   of its own previous baseline_weeks weeks
+  drift           a Product/Type pair whose last drift_weeks whole weeks ran
+                  above the same pair's drift_weeks weeks a quarter earlier.
+                  A rolling median follows a slow ramp, so a burst never
+                  sees one; a fixed look back does
 
 Metadata only: product, type, account, unit, created date, and the Jira key
 if one was recorded. No subject, no description, no LLM. A case with no
@@ -30,6 +34,9 @@ from zoneinfo import ZoneInfo
 import sfcli
 
 LOCAL_TZ = ZoneInfo("America/New_York")
+# A year in whole weeks, so the drift signal's year-ago blocks start on
+# Mondays too.
+YEAR_WEEKS = 52
 
 # Product values that mean "nobody classified this". The picklist has a
 # literal Undefined option alongside plain nulls.
@@ -119,6 +126,23 @@ def history_start_for(now: datetime, window_days: int, baseline_weeks: int) -> d
     baseline."""
     window_start = now - timedelta(days=window_days)
     return _week_start(_week_of(window_start) - timedelta(weeks=baseline_weeks))
+
+
+def _drift_blocks(now: datetime, drift_weeks: int, drift_offset_weeks: int) -> tuple[list[date], list[date]]:
+    """Mondays of the two blocks the drift signal compares: the whole weeks
+    just before the week in progress, and the same number of weeks
+    drift_offset_weeks earlier."""
+    current_week = _week_of(now)
+    recent = [current_week - timedelta(weeks=i) for i in range(drift_weeks, 0, -1)]
+    baseline = [week - timedelta(weeks=drift_offset_weeks) for week in recent]
+    return recent, baseline
+
+
+def drift_history_start_for(now: datetime, drift_weeks: int = 4, drift_offset_weeks: int = 13) -> datetime:
+    """How far back to fetch so the drift signal has its baseline block and
+    the same two blocks a year earlier."""
+    _, baseline = _drift_blocks(now, drift_weeks, drift_offset_weeks)
+    return _week_start(baseline[0] - timedelta(weeks=YEAR_WEEKS))
 
 
 def _pct(part: int, whole: int) -> float:
@@ -276,6 +300,81 @@ def _bursts(
     return found
 
 
+def _drifts(
+    cases: list[dict], now: datetime, history_start: datetime,
+    drift_weeks: int, drift_offset_weeks: int, drift_ratio: float, drift_min_excess: int,
+) -> tuple[list[dict], dict]:
+    """Returns (candidates, the blocks that were compared). One comparison
+    per pair, anchored on `now`: it answers "is this drifting today", so it
+    doesn't move with window_days."""
+    recent, baseline = _drift_blocks(now, drift_weeks, drift_offset_weeks)
+    year = timedelta(weeks=YEAR_WEEKS)
+    # Same rule as the burst baseline: a block the data doesn't fully cover
+    # is never read as a quiet one.
+    judged = _week_start(baseline[0]) >= history_start
+    has_year = _week_start(baseline[0] - year) >= history_start
+    blocks = {
+        "recentWeeks": [week.isoformat() for week in recent],
+        "baselineWeeks": [week.isoformat() for week in baseline],
+        "judged": judged,
+        "yearAgoCovered": judged and has_year,
+    }
+    if not judged:
+        return [], blocks
+
+    weekly: dict[tuple, dict[date, list[dict]]] = defaultdict(lambda: defaultdict(list))
+    for c in cases:
+        weekly[(c["product"], c["type"])][_week_of(c["created"])].append(c)
+
+    def drifted(count: int, base: int) -> bool:
+        # The small allowance keeps "exactly drift_ratio times" inclusive
+        # when the product isn't exact in floating point (1.1 * 100).
+        return count - base >= drift_min_excess and count >= drift_ratio * base - 1e-9
+
+    span = [baseline[0] + timedelta(weeks=i) for i in range(drift_offset_weeks + drift_weeks)]
+    found = []
+    for (product, type_), weeks in weekly.items():
+        def total(mondays: list[date]) -> int:
+            return sum(len(weeks.get(monday, ())) for monday in mondays)
+
+        count, base = total(recent), total(baseline)
+        if not drifted(count, base):
+            continue
+        # Seasonality check: the same comparison on the same weeks a year
+        # earlier. It tags the candidate and never removes it, because one
+        # prior year can't tell a seasonal rise from last year's incident.
+        year_ago = None
+        if has_year:
+            y_count = total([week - year for week in recent])
+            y_base = total([week - year for week in baseline])
+            year_ago = {
+                "recentCount": y_count,
+                "baselineCount": y_base,
+                "ratio": round(y_count / y_base, 1) if y_base else None,
+                "drifted": drifted(y_count, y_base),
+            }
+        found.append(_candidate(
+            "drift", [c for week in recent for c in weeks.get(week, ())],
+            product=product, type=type_, weakType=type_ in WEAK_TYPES,
+            recentCount=count, baselineCount=base,
+            ratio=round(count / base, 1) if base else None,
+            excess=count - base,
+            weekly=[
+                {
+                    "weekOf": week.isoformat(),
+                    "count": len(weeks.get(week, ())),
+                    "block": "baseline" if week in baseline else "recent" if week in recent else None,
+                }
+                for week in span
+            ],
+            yearAgo=year_ago,
+        ))
+    found.sort(key=lambda c: (
+        -c["excess"], c["product"], c["type"] or "", c["cases"][0]["caseNumber"],
+    ))
+    return found, blocks
+
+
 def build_report(
     cases: list[dict],
     now: datetime,
@@ -287,22 +386,37 @@ def build_report(
     baseline_weeks: int = 8,
     burst_ratio: float = 2.0,
     burst_min_excess: int = 5,
+    drift_weeks: int = 4,
+    drift_offset_weeks: int = 13,
+    drift_ratio: float = 1.5,
+    drift_min_excess: int = 20,
     history_start: datetime | None = None,
 ) -> dict:
     """Group normalized cases into problem candidates. Pure: no I/O, and
     `now` is passed in, so the same input always yields the same report.
 
     `cases` may reach back before the window; the older ones only feed the
-    burst baselines and the front end of a repeat-contact chain. `history_start` is how far back `cases` is known to be
-    complete (defaults to the earliest case), so a week the data doesn't
-    fully cover is never counted as a quiet week."""
-    if min(window_days, min_cases, min_repeats, baseline_weeks, burst_min_excess) < 1:
+    burst and drift baselines and the front end of a repeat-contact chain.
+    `history_start` is how far back `cases` is known to be complete
+    (defaults to the earliest case), so a week the data doesn't fully cover
+    is never counted as a quiet week.
+
+    The drift signal wants over a year of history. Repeat-contact chains
+    are still only followed back as far as the burst baseline reaches, so
+    fetching more for drift doesn't change what the other signals return."""
+    if min(window_days, min_cases, min_repeats, baseline_weeks, burst_min_excess,
+           drift_weeks, drift_min_excess) < 1:
         raise ValueError("window and thresholds must all be at least 1")
-    if repeat_days < 0 or burst_ratio < 1:
-        raise ValueError("repeat_days must be >= 0 and burst_ratio >= 1")
+    if repeat_days < 0 or burst_ratio < 1 or drift_ratio < 1:
+        raise ValueError("repeat_days must be >= 0 and the ratios >= 1")
+    if drift_offset_weeks < drift_weeks:
+        raise ValueError("drift_offset_weeks must be at least drift_weeks, or the blocks overlap")
+    if drift_offset_weeks + drift_weeks > YEAR_WEEKS:
+        raise ValueError("the drift blocks must fit inside a year, or the year-ago check overlaps them")
     window_start = now - timedelta(days=window_days)
     if history_start is None:
         history_start = min((c["created"] for c in cases), default=now)
+    chain_start = history_start_for(now, window_days, baseline_weeks)
 
     in_window = [c for c in cases if window_start <= c["created"] <= now]
     classified = [c for c in in_window if c["product"] not in UNCLASSIFIED_PRODUCTS]
@@ -314,6 +428,10 @@ def build_report(
     total = len(in_window)
     unclassified = total - len(classified)
     weak = sum(1 for c in classified if c["type"] in WEAK_TYPES)
+    drift, drift_blocks = _drifts(
+        classified_history, now, history_start,
+        drift_weeks, drift_offset_weeks, drift_ratio, drift_min_excess,
+    )
     return {
         "window": {
             "days": window_days,
@@ -328,7 +446,12 @@ def build_report(
             "baselineWeeks": baseline_weeks,
             "burstRatio": burst_ratio,
             "burstMinExcess": burst_min_excess,
+            "driftWeeks": drift_weeks,
+            "driftOffsetWeeks": drift_offset_weeks,
+            "driftRatio": drift_ratio,
+            "driftMinExcess": drift_min_excess,
         },
+        "driftBlocks": drift_blocks,
         "coverage": {
             "cases": total,
             "unclassified": unclassified,
@@ -342,12 +465,14 @@ def build_report(
         },
         "recurrence": _recurrences(classified, min_cases),
         "repeat_contact": _repeat_contacts(
-            classified_history, window_start, repeat_days, min_repeats
+            [c for c in classified_history if c["created"] >= chain_start],
+            window_start, repeat_days, min_repeats,
         ),
         "burst": _bursts(
             classified_history, now, window_start, history_start,
             baseline_weeks, burst_ratio, burst_min_excess,
         ),
+        "drift": drift,
     }
 
 
@@ -356,7 +481,8 @@ def _instance_url() -> str:
 
 
 def fetch_report(window_days: int = 90, as_of: datetime | None = None, **thresholds) -> dict:
-    """Query the org and build the report. One SELECT over Case.
+    """Query the org and build the report. One SELECT over Case, reaching
+    back far enough for the drift signal's year-ago check (about 16 months).
 
     Pass `as_of` to rebuild the queue as it would have read on an earlier
     date, which is how a candidate gets checked against an investigation
@@ -364,7 +490,12 @@ def fetch_report(window_days: int = 90, as_of: datetime | None = None, **thresho
     values; only the case set and the dates move."""
     now = as_of or datetime.now(timezone.utc)
     baseline_weeks = thresholds.get("baseline_weeks", 8)
-    history_start = history_start_for(now, window_days, baseline_weeks)
+    history_start = min(
+        history_start_for(now, window_days, baseline_weeks),
+        drift_history_start_for(
+            now, thresholds.get("drift_weeks", 4), thresholds.get("drift_offset_weeks", 13)
+        ),
+    )
     since = history_start.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     instance_url = _instance_url()
     cases = [

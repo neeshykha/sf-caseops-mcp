@@ -9,11 +9,12 @@ Run:  python3 -m unittest discover -s tests
 import random
 import sys
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import problem_page  # noqa: E402
 import problems  # noqa: E402
 
 ET = problems.LOCAL_TZ
@@ -163,6 +164,7 @@ class Coverage(unittest.TestCase):
         self.assertEqual(report["coverage"]["cases"], 0)
         self.assertEqual(report["coverage"]["unclassifiedPct"], 0.0)
         self.assertEqual((report["recurrence"], report["repeat_contact"], report["burst"]), ([], [], []))
+        self.assertEqual(report["drift"], [])
 
     def test_window_edges(self):
         cases = [
@@ -409,6 +411,259 @@ class Burst(unittest.TestCase):
         self.assertEqual(report["coverage"]["cases"], len(in_window))
 
 
+class Drift(unittest.TestCase):
+    # The week in progress starts Mon Mar 16, so the recent block is the
+    # weeks of Feb 16 to Mar 9 (the spring DST change falls inside it) and
+    # the baseline block is 13 weeks earlier: Nov 17 to Dec 8.
+    BASELINE = date(2025, 11, 17)
+    GAP = date(2025, 12, 15)
+    RECENT = date(2026, 2, 16)
+    YEAR = timedelta(weeks=52)
+    HISTORY = problems.drift_history_start_for(NOW)
+    KW = dict(min_cases=999, min_repeats=999)
+
+    def weeks(self, first, counts, **kw):
+        out = []
+        for i, n in enumerate(counts):
+            out += in_week(first + timedelta(weeks=i), n, **kw)
+        return out
+
+    def pair(self, baseline, recent, gap=None, **kw):
+        """A pair with `baseline` and `recent` cases a week in its two
+        blocks and `gap` a week (default: same as baseline) in between."""
+        gap = baseline if gap is None else gap
+        return (
+            self.weeks(self.BASELINE, [baseline] * 4, **kw)
+            + self.weeks(self.GAP, [gap] * 9, **kw)
+            + self.weeks(self.RECENT, [recent] * 4, **kw)
+        )
+
+    def run_report(self, cases, history=None, **kw):
+        return problems.build_report(
+            cases, NOW, history_start=history or self.HISTORY, **{**self.KW, **kw}
+        )
+
+    def drift(self, cases, **kw):
+        return self.run_report(cases, **kw)["drift"]
+
+    def test_history_start_reaches_the_year_ago_baseline(self):
+        self.assertEqual(self.HISTORY, datetime(2024, 11, 18, tzinfo=ET))
+
+    def test_blocks_are_reported(self):
+        blocks = self.run_report([])["driftBlocks"]
+        self.assertEqual(blocks, {
+            "recentWeeks": ["2026-02-16", "2026-02-23", "2026-03-02", "2026-03-09"],
+            "baselineWeeks": ["2025-11-17", "2025-11-24", "2025-12-01", "2025-12-08"],
+            "judged": True,
+            "yearAgoCovered": True,
+        })
+
+    def test_steady_pair_is_quiet(self):
+        self.assertEqual(self.drift(self.pair(10, 10)), [])
+
+    def test_slow_ramp_is_flagged_where_burst_stays_silent(self):
+        ramp = [10, 10, 10, 10, 11, 12, 12, 13, 14, 14, 15, 16, 17, 17, 18, 19, 20]
+        report = self.run_report(self.weeks(self.BASELINE, ramp))
+        self.assertEqual(report["burst"], [])
+        self.assertEqual(len(report["drift"]), 1)
+        c = report["drift"][0]
+        self.assertEqual((c["product"], c["type"], c["weakType"]), ("Lock", "Keypad Issue", False))
+        self.assertEqual((c["recentCount"], c["baselineCount"], c["ratio"], c["excess"]), (74, 40, 1.9, 34))
+        self.assertEqual([w["count"] for w in c["weekly"]], ramp)
+        self.assertEqual(
+            [w["block"] for w in c["weekly"]], ["baseline"] * 4 + [None] * 9 + ["recent"] * 4
+        )
+        self.assertEqual((c["weekly"][0]["weekOf"], c["weekly"][-1]["weekOf"]), ("2025-11-17", "2026-03-09"))
+
+    def test_candidate_cases_are_the_recent_block(self):
+        c = self.drift(self.pair(5, 12, account="A1") + self.weeks(self.RECENT, [3] * 4, account="A2"))[0]
+        self.assertEqual((c["count"], c["recentCount"], len(c["cases"])), (60, 60, 60))
+        self.assertEqual([p["count"] for p in c["properties"]], [48, 12])
+        first = datetime(2026, 2, 16, tzinfo=ET).isoformat()
+        self.assertTrue(all(row["created"] >= first for row in c["cases"]))
+
+    def test_ratio_met_but_excess_too_small(self):
+        # 5 a week, then 9: 1.8x, but only 16 over across the block.
+        cases = self.pair(5, 9)
+        self.assertEqual(self.drift(cases), [])
+        self.assertEqual(len(self.drift(cases, drift_min_excess=16)), 1)
+
+    def test_excess_met_but_ratio_too_small(self):
+        # 25 a week, then 32: 28 over, but only 1.28x.
+        cases = self.pair(25, 32)
+        self.assertEqual(self.drift(cases), [])
+        self.assertEqual(len(self.drift(cases, drift_ratio=1.25)), 1)
+
+    def test_thresholds_are_inclusive(self):
+        # 10 a week, then 15: exactly 1.5x and exactly 20 over.
+        self.assertEqual(len(self.drift(self.pair(10, 15))), 1)
+        # 1.1 * 100 is 110.00000000000001 in floating point.
+        self.assertEqual(len(self.drift(self.pair(25, 27, gap=0) + self.weeks(self.RECENT, [2]),
+                                        drift_ratio=1.1, drift_min_excess=10)), 1)
+
+    def test_new_pair_with_nothing_a_quarter_ago(self):
+        c = self.drift(self.weeks(self.RECENT, [5] * 4, product="Portal", type_="Alerts"))[0]
+        self.assertEqual((c["recentCount"], c["baselineCount"], c["ratio"]), (20, 0, None))
+
+    def test_week_in_progress_is_not_counted(self):
+        start = datetime(2026, 3, 16, 8, 0, tzinfo=ET)
+        cases = self.pair(10, 10) + [case(start + timedelta(hours=i), unit=f"p{i}") for i in range(40)]
+        self.assertEqual(self.drift(cases), [])
+
+    def test_weeks_between_the_blocks_do_not_count(self):
+        self.assertEqual(self.drift(self.pair(10, 10, gap=40)), [])
+        # ...and the week just before the baseline block doesn't either.
+        early = in_week(self.BASELINE - timedelta(weeks=1), 60)
+        self.assertEqual(len(self.drift(self.pair(10, 16) + early)), 1)
+
+    def test_pairs_are_judged_separately(self):
+        cases = self.pair(6, 8) + self.pair(6, 8, type_="Battery") + self.pair(6, 8, product="Hub")
+        self.assertEqual(self.drift(cases), [])
+
+    def test_weeks_are_local_not_utc(self):
+        # Sunday 11:30 PM Eastern closes the recent block; half an hour
+        # into Monday is the week in progress.
+        cases = self.pair(5, 5)
+        late_sunday = datetime(2026, 3, 15, 23, 30, tzinfo=ET).astimezone(timezone.utc)
+        cases += [case(late_sunday, unit=f"s{i}") for i in range(19)]
+        monday_morning = datetime(2026, 3, 16, 0, 30, tzinfo=ET).astimezone(timezone.utc)
+        self.assertEqual(self.drift(cases + [case(monday_morning, unit="m")]), [])
+        found = self.drift(cases + [case(late_sunday, unit="s19")])
+        self.assertEqual((found[0]["recentCount"], found[0]["weekly"][-1]["count"]), (40, 25))
+
+    def test_as_of_a_sunday_midnight_counts_the_week_just_closed(self):
+        as_of = datetime(2026, 3, 16, tzinfo=ET)
+        self.assertEqual(len(problems.build_report(
+            self.pair(10, 15), as_of, history_start=self.HISTORY, **self.KW
+        )["drift"]), 1)
+
+    def test_week_in_progress_is_local_on_the_now_side_too(self):
+        # Sunday 10 PM Eastern is already Monday in UTC. The week of Mar 9
+        # is still in progress, so the recent block ends with Mar 2.
+        as_of = datetime(2026, 3, 15, 22, 0, tzinfo=ET).astimezone(timezone.utc)
+        blocks = problems.build_report([], as_of, history_start=self.HISTORY)["driftBlocks"]
+        self.assertEqual(blocks["recentWeeks"][-1], "2026-03-02")
+
+    def test_short_history_is_not_read_as_a_quiet_baseline(self):
+        cases = self.weeks(self.RECENT, [10] * 4)
+        late = datetime(2025, 11, 18, tzinfo=ET)  # a day into the baseline block
+        report = self.run_report(cases, history=late)
+        self.assertEqual(report["drift"], [])
+        self.assertEqual(
+            (report["driftBlocks"]["judged"], report["driftBlocks"]["yearAgoCovered"]), (False, False)
+        )
+        self.assertEqual(len(self.drift(cases, history=datetime(2025, 11, 17, tzinfo=ET))), 1)
+
+    def test_default_history_start_is_the_earliest_case(self):
+        # Earliest case is noon on the baseline block's first Monday, so
+        # that week isn't whole and nothing is judged.
+        self.assertEqual(problems.build_report(self.pair(10, 20), NOW, **self.KW)["drift"], [])
+
+    def test_year_ago_same_rise_is_tagged_not_removed(self):
+        last_year = (
+            self.weeks(self.BASELINE - self.YEAR, [8] * 4)
+            + self.weeks(self.RECENT - self.YEAR, [14] * 4)
+        )
+        c = self.drift(self.pair(10, 18) + last_year)[0]
+        self.assertEqual(
+            c["yearAgo"], {"recentCount": 56, "baselineCount": 32, "ratio": 1.8, "drifted": True}
+        )
+
+    def test_year_ago_flat_is_not_seasonal(self):
+        last_year = (
+            self.weeks(self.BASELINE - self.YEAR, [10] * 4)
+            + self.weeks(self.RECENT - self.YEAR, [11] * 4)
+        )
+        c = self.drift(self.pair(10, 18) + last_year)[0]
+        self.assertEqual(
+            c["yearAgo"], {"recentCount": 44, "baselineCount": 40, "ratio": 1.1, "drifted": False}
+        )
+
+    def test_year_ago_with_no_cases_then(self):
+        c = self.drift(self.pair(10, 18))[0]
+        self.assertEqual(
+            c["yearAgo"], {"recentCount": 0, "baselineCount": 0, "ratio": None, "drifted": False}
+        )
+
+    def test_year_ago_not_covered_by_history_is_none(self):
+        # One day short of the year-ago baseline block.
+        late = self.HISTORY + timedelta(days=1)
+        report = self.run_report(self.pair(10, 18), history=late)
+        self.assertIsNone(report["drift"][0]["yearAgo"])
+        self.assertEqual(
+            (report["driftBlocks"]["judged"], report["driftBlocks"]["yearAgoCovered"]), (True, False)
+        )
+
+    def test_unclassified_cannot_drift(self):
+        cases = self.weeks(self.RECENT, [30] * 4, product="Undefined", type_="Not Enough Information")
+        cases += self.weeks(self.RECENT, [30] * 4, product=None, type_=None)
+        self.assertEqual(self.drift(cases), [])
+
+    def test_weak_type_is_tagged(self):
+        self.assertTrue(self.drift(self.pair(10, 18, type_="Other"))[0]["weakType"])
+
+    def test_sorted_by_excess(self):
+        cases = self.pair(10, 16) + self.pair(10, 30, type_="Battery") + self.pair(0, 6, product="Hub")
+        self.assertEqual([c["excess"] for c in self.drift(cases)], [80, 24, 24])
+        self.assertEqual([c["product"] for c in self.drift(cases)], ["Lock", "Hub", "Lock"])
+
+    def test_does_not_move_with_the_window(self):
+        cases = self.pair(10, 18)
+        self.assertEqual(self.drift(cases, window_days=7), self.drift(cases, window_days=90))
+
+    def test_longer_history_does_not_lengthen_repeat_contact_chains(self):
+        # One unit calling every 10 days for 400 days. The chain is only
+        # followed back as far as the burst baseline reaches, however much
+        # history was fetched for drift.
+        cases = [days_ago(d) for d in range(5, 400, 10)]
+        chain_start = problems.history_start_for(NOW, 90, 8)
+        kept = [c for c in cases if c["created"] >= chain_start]
+        self.assertLess(len(kept), len(cases))
+        found = problems.build_report(cases, NOW, history_start=self.HISTORY)["repeat_contact"]
+        self.assertEqual([c["count"] for c in found], [len(kept)])
+
+
+class Page(unittest.TestCase):
+    def render(self, cases, **kw):
+        report = problems.build_report(cases, NOW, history_start=Drift.HISTORY, **kw)
+        return problem_page.render({"generatedAt": NOW.isoformat(), "instanceUrl": "https://x", **report})
+
+    def test_drift_section(self):
+        d = Drift()
+        last_year = d.weeks(d.BASELINE - d.YEAR, [8] * 4) + d.weeks(d.RECENT - d.YEAR, [14] * 4)
+        page = self.render(
+            d.pair(10, 18) + last_year + d.weeks(d.RECENT, [5] * 4, product="Portal", type_="Alerts")
+        )
+        self.assertIn("Drifting above a quarter ago (2)", page)
+        self.assertIn("(Feb 16 to Mar 15)", page)
+        self.assertIn("(Nov 17 to Dec 14)", page)
+        self.assertIn("72 vs 40 a quarter earlier (1.8x)", page)
+        self.assertIn("20 vs 0 a quarter earlier (from nothing)", page)
+        self.assertIn("Same weeks a year earlier: 56 vs 32 (1.8x). It would have flagged then too", page)
+        self.assertIn("Same weeks a year earlier: 0 vs 0. It wouldn't have flagged then.", page)
+        self.assertEqual(page.count("also rose a year ago</span>"), 1)
+
+    def test_drift_without_year_ago_history(self):
+        d = Drift()
+        report = problems.build_report(
+            d.pair(10, 18), NOW, history_start=datetime(2025, 11, 17, tzinfo=ET)
+        )
+        page = problem_page.render({"generatedAt": NOW.isoformat(), "instanceUrl": "https://x", **report})
+        self.assertIn("no year-ago history</span>", page)
+
+    def test_drift_not_judged_says_so(self):
+        report = problems.build_report([days_ago(1)], NOW)
+        page = problem_page.render({"generatedAt": NOW.isoformat(), "instanceUrl": "https://x", **report})
+        self.assertIn("Not judged: the case history", page)
+
+    def test_every_section_renders(self):
+        cases = [days_ago(d) for d in (30, 20, 10, 5, 1)]
+        page = self.render(cases, min_cases=3)
+        for label in ("Recurring at one property (1)", "Repeat contacts from one unit (1)",
+                      "Bursts above", "Drifting above a quarter ago (0)", "Pairs drifting up"):
+            self.assertIn(label, page)
+
+
 class Determinism(unittest.TestCase):
     def test_input_order_does_not_matter(self):
         rng = random.Random(7)
@@ -441,7 +696,7 @@ class Determinism(unittest.TestCase):
         ]
         by_number = {c["caseNumber"]: c for c in cases}
         report = problems.build_report(cases, NOW, min_cases=3)
-        for signal in ("recurrence", "repeat_contact", "burst"):
+        for signal in ("recurrence", "repeat_contact", "burst", "drift"):
             for candidate in report[signal]:
                 self.assertEqual(candidate["count"], len(candidate["cases"]))
                 for row in candidate["cases"]:
@@ -457,7 +712,9 @@ class Determinism(unittest.TestCase):
 class Thresholds(unittest.TestCase):
     def test_rejects_nonsense(self):
         for bad in ({"window_days": 0}, {"min_cases": 0}, {"burst_min_excess": 0},
-                    {"burst_ratio": 0.5}, {"repeat_days": -1}, {"baseline_weeks": 0}):
+                    {"burst_ratio": 0.5}, {"repeat_days": -1}, {"baseline_weeks": 0},
+                    {"drift_weeks": 0}, {"drift_min_excess": 0}, {"drift_ratio": 0.9},
+                    {"drift_offset_weeks": 3}, {"drift_offset_weeks": 49}):
             with self.assertRaises(ValueError, msg=bad):
                 problems.build_report([], NOW, **bad)
 

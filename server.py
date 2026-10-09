@@ -196,16 +196,20 @@ def problem_candidates(
     """Candidate ITIL problem records from the last N days of cases, grouped
     on metadata only (Product/Type, account, unit, created date): the same
     Product/Type pair recurring at one property (recurrence), a pair's week
-    running above its own 8-week baseline (burst), and one unit coming back
-    within repeat_days of its last case (repeat_contact). Each candidate
+    running above its own 8-week baseline (burst), a pair's last four whole
+    weeks running 1.5x or more above the same pair a quarter earlier (drift:
+    the slow climb a burst misses; `yearAgo` is the same comparison one year
+    back, and `drifted` true there means the rise may be seasonal), and one
+    unit coming back within repeat_days of its last case (repeat_contact).
+    `driftBlocks` names the weeks drift compared. Each candidate
     carries count, affected properties, first and last seen, any Jira keys
     recorded on its cases, and Lightning URLs. Read `coverage` first: cases
     with no Product can't form a candidate, and that share is reported there.
-    Filter with signal='recurrence' | 'burst' | 'repeat_contact'."""
+    Filter with signal='recurrence' | 'burst' | 'drift' | 'repeat_contact'."""
     if not 7 <= days <= 365:
         raise ValueError("days must be between 7 and 365")
-    if signal not in ("", "recurrence", "burst", "repeat_contact"):
-        raise ValueError("signal must be recurrence, burst, repeat_contact, or empty")
+    if signal not in ("", "recurrence", "burst", "drift", "repeat_contact"):
+        raise ValueError("signal must be recurrence, burst, drift, repeat_contact, or empty")
     if not 2 <= min_cases <= 100:
         raise ValueError("min_cases must be between 2 and 100")
     if not 1 <= repeat_days <= 90:
@@ -217,9 +221,9 @@ def problem_candidates(
     full = problems.fetch_report(days, min_cases=min_cases, repeat_days=repeat_days)
     report = {
         key: full[key]
-        for key in ("generatedAt", "window", "thresholds", "coverage")
+        for key in ("generatedAt", "window", "thresholds", "coverage", "driftBlocks")
     }
-    for key in ("recurrence", "burst", "repeat_contact"):
+    for key in ("recurrence", "burst", "drift", "repeat_contact"):
         if signal and signal != key:
             continue
         report[key] = {

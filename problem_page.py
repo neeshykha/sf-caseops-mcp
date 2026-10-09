@@ -78,6 +78,10 @@ a { color: inherit; text-decoration: none; border-bottom: 1px dotted var(--ink-3
 a:hover { border-bottom-style: solid; }
 button.copy { font: inherit; font-size: 12px; color: var(--ink); background: var(--chip); border: 1px solid var(--line); border-radius: 6px; padding: 3px 9px; cursor: pointer; margin-top: 10px; }
 .empty { color: var(--ink-3); font-size: 13px; padding: 6px 0; }
+.spark { display: flex; align-items: flex-end; gap: 3px; height: 46px; }
+.spark i { width: 14px; min-height: 1px; background: var(--line); border-radius: 2px 2px 0 0; }
+.spark i.base { background: var(--ink-3); }
+.spark i.recent { background: var(--serious); }
 footer { color: var(--ink-3); font-size: 12px; max-width: 860px; margin-top: 6px; }
 """
 
@@ -104,6 +108,16 @@ SECTIONS = [
         "{baselineWeeks} weeks, and at least {burstMinExcess} cases over it. Org-wide, so the "
         "properties list shows whether it's one site or everywhere. Sorted by the biggest single-week "
         "jump. The week in progress isn't judged.",
+    ),
+    (
+        "drift", "Drifting above a quarter ago",
+        "A pair whose last {driftWeeks} whole weeks ({driftRecent}) ran at {driftRatio}x or more "
+        "the same pair's {driftWeeks} weeks {driftOffsetWeeks} weeks earlier ({driftBaseline}), and "
+        "at least {driftMinExcess} cases over it. This is the slow climb a burst can't see. "
+        "Seasonal volume looks the same from here: thermostat and HVAC pairs rise every summer. "
+        "So each row also shows the same comparison one year back, and a pair that would have "
+        "flagged then too is tagged, not hidden. One prior year can't settle whether that was "
+        "the season or last year's incident. The count is the recent block.",
     ),
     (
         "repeat_contact", "Repeat contacts from one unit",
@@ -143,6 +157,13 @@ def _title(c: dict) -> tuple[str, str]:
         )
         props = f"{c['propertyCount']} propert{'ies' if c['propertyCount'] != 1 else 'y'}"
         return _pair(c), f"{weeks} · {props} · {seen}{open_note}"
+    if c["signal"] == "drift":
+        ratio = f"{c['ratio']:g}x" if c["ratio"] is not None else "from nothing"
+        props = f"{c['propertyCount']} propert{'ies' if c['propertyCount'] != 1 else 'y'}"
+        return _pair(c), (
+            f"{c['recentCount']} vs {c['baselineCount']} a quarter earlier ({ratio}) · "
+            f"{props}{open_note}"
+        )
     where = c["property"] or "(no property)"
     return (
         f"Unit {c['unit'] or '?'} at {where}",
@@ -159,6 +180,49 @@ def _jira_tag(c: dict) -> str:
     return '<span class="tag none">No Jira key recorded</span>'
 
 
+def _week_label(iso: str) -> str:
+    return datetime.fromisoformat(iso).strftime("%b %-d")
+
+
+def _block_label(mondays: list[str]) -> str:
+    """'Jun 1 to Jun 28' for a block given as its Mondays."""
+    last_day = datetime.fromisoformat(mondays[-1]) + timedelta(days=6)
+    return f"{_week_label(mondays[0])} to {last_day.strftime('%b %-d')}"
+
+
+def _drift_body(c: dict) -> str:
+    """Weekly counts from the baseline block through the recent one, so a
+    ramp, a step, and one bad week can be told apart at a glance."""
+    weekly = c["weekly"]
+    top = max(w["count"] for w in weekly) or 1
+    css = {"baseline": "base", "recent": "recent", None: ""}
+    bars = "".join(
+        f"<i class='{css[w['block']]}' style='height:{round(44 * w['count'] / top)}px' "
+        f"title='week of {_week_label(w['weekOf'])}: {w['count']}'></i>"
+        for w in weekly
+    )
+    counts = " ".join(str(w["count"]) for w in weekly)
+    out = (
+        f"<h3>Cases per week, {_week_label(weekly[0]['weekOf'])} onward</h3>"
+        f"<div class='spark'>{bars}</div>"
+        f"<div class='sub'>{counts} · dark bars are the baseline block, orange the recent one</div>"
+    )
+    year = c["yearAgo"]
+    if year is None:
+        out += "<div class='sub'>No history a year back, so no seasonality check on this row.</div>"
+    else:
+        ratio = f" ({year['ratio']:g}x)" if year["ratio"] is not None else ""
+        verdict = (
+            "It would have flagged then too, so this may be the season."
+            if year["drifted"] else "It wouldn't have flagged then."
+        )
+        out += (
+            f"<div class='sub'>Same weeks a year earlier: {year['recentCount']} vs "
+            f"{year['baselineCount']}{ratio}. {verdict}</div>"
+        )
+    return out
+
+
 def _candidate(c: dict) -> str:
     title, sub = _title(c)
     tags = [_jira_tag(c)]
@@ -166,7 +230,15 @@ def _candidate(c: dict) -> str:
         tags.append('<span class="tag weak">weak type</span>')
     if c.get("placeholderUnit"):
         tags.append('<span class="tag weak">placeholder unit</span>')
+    if c["signal"] == "drift":
+        if c["yearAgo"] is None:
+            tags.append('<span class="tag weak">no year-ago history</span>')
+        elif c["yearAgo"]["drifted"]:
+            tags.append('<span class="tag weak">also rose a year ago</span>')
     body = []
+
+    if c["signal"] == "drift":
+        body.append(_drift_body(c))
 
     if c["signal"] != "recurrence":
         body.append("<h3>Affected properties</h3><div class='chips'>" + "".join(
@@ -260,6 +332,7 @@ def render(report: dict) -> str:
         (f"{cov['cases']:,}", "Cases in window"),
         (len(report["recurrence"]), "Recurring at one property"),
         (len(report["burst"]), "Pairs that burst"),
+        (len(report["drift"]), "Pairs drifting up"),
         (len(report["repeat_contact"]), "Repeat-contact units"),
         (f"{no_ticket} of {len(candidates)}", "Candidates with no Jira key"),
     ]
@@ -268,12 +341,21 @@ def render(report: dict) -> str:
         for n, label in tiles
     ) + "</div>")
 
+    blocks = report["driftBlocks"]
+    words = {
+        **thr,
+        "driftRecent": _block_label(blocks["recentWeeks"]),
+        "driftBaseline": _block_label(blocks["baselineWeeks"]),
+    }
     for key, label, blurb in SECTIONS:
         rows = report[key]
+        empty = "Nothing over the threshold."
+        if key == "drift" and not blocks["judged"]:
+            empty = "Not judged: the case history doesn't reach back to the baseline block."
         parts.append(
             f"<section><h2>{label} ({len(rows)})</h2>"
-            f'<div class="rollup">{_e(blurb.format(**thr))}</div>'
-            + ("".join(_candidate(c) for c in rows) or '<div class="empty">Nothing over the threshold.</div>')
+            f'<div class="rollup">{_e(blurb.format(**words))}</div>'
+            + ("".join(_candidate(c) for c in rows) or f'<div class="empty">{empty}</div>')
             + "</section>"
         )
 
@@ -297,6 +379,8 @@ def main() -> None:
     parser.add_argument("--days", type=int, default=90, help="window in days (30-90 is the useful range)")
     parser.add_argument("--min-cases", type=int, default=5)
     parser.add_argument("--repeat-days", type=int, default=14)
+    parser.add_argument("--drift-ratio", type=float, default=1.5)
+    parser.add_argument("--drift-min-excess", type=int, default=20)
     parser.add_argument("--as-of", help="YYYY-MM-DD: build the queue as of the end of that day")
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     args = parser.parse_args()
@@ -308,7 +392,8 @@ def main() -> None:
         day = datetime.strptime(args.as_of, "%Y-%m-%d").date() + timedelta(days=1)
         as_of = datetime.combine(day, time.min, tzinfo=problems.LOCAL_TZ)
     report = problems.fetch_report(
-        args.days, as_of=as_of, min_cases=args.min_cases, repeat_days=args.repeat_days
+        args.days, as_of=as_of, min_cases=args.min_cases, repeat_days=args.repeat_days,
+        drift_ratio=args.drift_ratio, drift_min_excess=args.drift_min_excess,
     )
     args.out.write_text(render(report), encoding="utf-8")
     counts = ", ".join(f"{len(report[key])} {key}" for key, _, _ in SECTIONS)

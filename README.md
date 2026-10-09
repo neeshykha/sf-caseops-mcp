@@ -44,7 +44,7 @@ can always verify before trusting an answer.
 | `queue_volumes` | Open case counts by queue/owner — the "where's the backlog" view |
 | `case_volume_report` | Weekly created vs closed vs net, for trend spotting |
 | `sla_risk_report` | Entitlement milestone risk: pending first-response clocks, fresh breaches, paused waiting-on-customer milestones |
-| `problem_candidates` | Candidate problem records: Product/Type pairs recurring at one property, weekly bursts over a pair's own baseline, units that keep coming back |
+| `problem_candidates` | Candidate problem records: Product/Type pairs recurring at one property, weekly bursts over a pair's own baseline, slow drifts above a quarter ago, units that keep coming back |
 
 ---
 
@@ -159,7 +159,7 @@ python3 problem_page.py --days 30
 python3 problem_page.py --as-of 2026-06-30 --out june.html
 ```
 
-Three signals, all deterministic:
+Four signals, all deterministic:
 
 - **Recurrence**: the same Product/Type pair at the same property, five or
   more times in the window. The unit count tells you which kind of problem
@@ -169,6 +169,10 @@ Three signals, all deterministic:
   eight weeks, and at least five cases over it. Each pair is judged against
   itself, so a noisy category doesn't drown a quiet one that tripled. The
   median matters: one bad week doesn't raise the bar for the next.
+- **Drift**: a pair whose last four whole weeks ran at 1.5x or more the same
+  pair's four weeks a quarter (13 weeks) earlier, and at least 20 cases over
+  it. This is the slow climb a burst can't see, because a rolling baseline
+  climbs along with it. A baseline fixed a quarter back doesn't.
 - **Repeat contact**: three or more cases from one unit, each within 14 days
   of the one before. Product and type can differ here, because the signal is
   that the first answer didn't hold.
@@ -177,6 +181,30 @@ Every candidate shows its count, the properties it touches, first and last
 seen, and whether a Jira key is recorded on any of its cases. Every case
 number links to the record in Lightning. A candidate is a claim, and the
 cases are how you check it.
+
+**Why those drift numbers.** Four weeks, because one week of a mid-sized
+pair is mostly noise and a four-week sum isn't. Thirteen weeks back, because
+that's far enough that a ramp hasn't dragged its own baseline up yet, and
+near enough that the product and the property base are still roughly the
+same. 1.5x, because asking a slow climb for 2x is asking it to be a burst.
+And 20 cases over, which is the burst rule's five-a-week floor carried across
+the block: a pair needs at least 20 cases in four weeks to flag at all, so a
+pair going from two to five never shows up. Drift is one comparison anchored
+on today. It doesn't move with `--days`.
+
+**Seasonality, and what I did about it.** A quarter-ago comparison reads
+every seasonal rise as drift. Thermostat and HVAC cases climb each summer,
+and from thirteen weeks back that looks exactly like a defect. I considered
+three answers. Comparing share of total volume instead of raw counts doesn't
+fix it: a summer category's share rises in summer too, and one large pair
+ramping shrinks everyone else's share. A caveat on the page alone is honest
+but leaves the reader to do the work. So each drift row runs the same
+comparison on the same weeks one year earlier and prints the result. If the
+pair would have flagged then too, the row is tagged "also rose a year ago."
+It's a tag and never a filter, and the caveat is on the page as well, because
+one prior year can't tell the season from last year's incident. The query
+reaches back about 16 months to make that check possible; the other three
+signals still see only what they saw before.
 
 **What it reads, and what it doesn't.** Product, type, account, unit,
 created date, and the Jira field. No subjects, no descriptions, no model
@@ -208,7 +236,39 @@ categories. The burst signal flagged one of them in the same month the hand
 investigation put the change in volume. It never flagged the other: that
 category climbed for three months, peaking at 1.6x to 1.75x its baseline
 against a 2x bar, because a rolling median follows a slow ramp up. Bursts
-catch jumps, not drifts. And nothing here could see the first reports, filed
+catch jumps, not drifts.
+
+That miss is why the drift signal exists, so I back-tested it the same way:
+53 weekly `--as-of` runs across a year. Drift flagged the category at the
+close of the week the hand investigation calls the breakout, at 1.7x a
+quarter earlier, the same week burst read as 1.6x and passed over. It
+flagged it on 13 of the 20 weekly runs across the climb. It did not flag it
+in the five weeks before the breakout, and it dropped it for two runs
+afterward at just under 1.5x.
+
+The noise check, at the same threshold: a median of two other pairs per run
+and a worst week of seven, in midsummer. Nineteen of 85 pairs flagged at
+least once in the year, and 14 of the 53 runs flagged nothing. About a
+quarter of all flags carried the year-ago tag, including every summer HVAC
+one. Raising the floor from 20 to 30 cases over cuts the other pairs to a
+median of zero without losing the known case (`--drift-min-excess 30`). I
+left the default at 20, since the only evidence for 30 is the one case I
+already knew the answer to.
+
+What drift still can't see:
+
+- **The season, for certain.** The year-ago tag fired on about half the
+  flags for the category I knew was a real defect, because the same weeks a
+  year before held an unrelated spike. The tag is a reason to look at last
+  year's cases, not a verdict.
+- **A climb that has plateaued.** Once the higher level is a quarter old, it
+  is the baseline. The category stopped flagging while still running at
+  about twice the volume of a year before.
+- **Anything slower than 1.5x a quarter, or smaller than the floor.**
+- **Holiday weeks.** A quiet baseline block can make an ordinary month look
+  like a rise. I haven't measured how often.
+
+And nothing here could see the first reports, filed
 ten months earlier: two cases, recognizable only from what the customer
 wrote. That's the boundary of a metadata-only approach, and the reason this
 produces candidates for a person to review and not problem records.
